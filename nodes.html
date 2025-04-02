@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Repo Graph</title>
+	
+	<author> Kustomzone </author>
+	<assistants> Openhands / QWEN </assistants>
+	
+	<version> 0.0.1 </version>
+	
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background-color: #282c34; color: #abb2bf; display: flex; flex-direction: column; height: 100vh; }
+        /* Ensure canvas container grows and canvas fills it */
+        #canvasContainer { flex-grow: 1; position: relative; width: 100%; height: 100%; /* Use percentages or rely on flex-grow */}
+        canvas { display: block; background-color: #1e1f22; width: 100%; height: 100%; /* Make canvas element fill container */ }
+        #controls { padding: 5px; background-color: #3c4049; text-align: center; flex-shrink: 0; }
+        #controls button { margin: 0 5px; padding: 5px 10px; background-color: #61afef; color: #1e1f22; border: none; border-radius: 3px; cursor: pointer; }
+        #controls button:hover { background-color: #82c0ff; }
+        #fileInputContainer { position: absolute; top: 10px; left: 10px; z-index: 10; background-color: rgba(40, 44, 52, 0.85); padding: 8px; border-radius: 5px; border: 1px solid #61afef; }
+        #fileInput { display: block; margin-bottom: 5px; }
+        #statusMessage { font-size: 0.8em; color: #98c379; min-height: 1.2em; padding-left: 7px; border-radius: 7px; border: 1px solid #61afef; background-color: rgba(0, 0, 0, 0.8); }
+        .tooltip {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            white-space: pre-wrap;
+            pointer-events: none;
+            display: none;
+            z-index: 100;
+            max-width: 300px;
+        }
+		
+		/* test button display */
+        .tooltip-toggle { font-color: rgba(0, 0, 0, 0.8); }
+		
+        /* style for XYZ coordinate display on node */
+        .coord-label {  text-decoration: underline; cursor: pointer; background-color: rgba(0, 0, 0, 0.8); } /* Indicate labels are clickable */
+        .coord-selected { text-decoration: underline; font-weight: bold; font-color: rgba(0, 0, 0, 0.8); } /* Highlight selected coord */
+
+    </style>
+</head>
+<body>
+    <div id="canvasContainer">
+        <div id="fileInputContainer">
+            <input type="file" id="fileInput" accept=".txt" title="Load output.txt">
+            <div id="statusMessage">Select output.txt to load nodes.</div>
+        </div>
+        <canvas id="nodeCanvas"></canvas>
+        <div id="tooltip" class="tooltip"></div>
+    </div>
+    <div id="controls">
+        <button id="saveBtn" title="Save selected node (Not Implemented)">Save</button>
+		<button id="clearBtn" title="Clear selected node (Not Implemented)">Clear</button>
+	    <button id="toolBtn" title="Tool selected node (Not Implemented)">Tool</button>
+        <button id="forkBtn" title="Fork selected node (Not Implemented)">Fork</button>
+        <button id="mergeBtn" title="Merge nodes (Not Implemented)">Merge</button>
+        <button id="selectBtn" title="Selection Tool (Active)">Select</button>
+        <button id="deleteBtn" title="Delete selected node (Not Implemented)">Delete</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('nodeCanvas');
+        const ctx = canvas.getContext('2d');
+        const fileInput = document.getElementById('fileInput');
+        const controls = document.getElementById('controls');
+        const tooltip = document.getElementById('tooltip');
+        const statusMessage = document.getElementById('statusMessage');
+
+        // --- State Variables ---
+        let nodes = [];
+        let wires = [];
+        let draggingNode = null;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+        let selectedNodeId = null;
+        let hoveredNodeId = null;
+        let hoveredConnectorInfo = null;
+        let isWiring = false;
+        let wireStartX = 0;
+        let wireStartY = 0;
+        let wireStartConnectorInfo = null;
+        let wireEndX = 0;
+        let wireEndY = 0;
+        let camera = { x: 0, y: 0, z: 1000 }; // Not actively used for projection yet
+        const perspectiveFactor = 500;
+        const NODE_WIDTH = 180;
+        const NODE_TITLE_HEIGHT = 25;
+        const NODE_COORD_HEIGHT = 20; // Height for coordinate display area
+        const NODE_CONNECTOR_HEIGHT = 20;
+        const CONNECTOR_RADIUS = 5;
+        const NODE_COLOR = '#61afef';
+        const NODE_SELECTED_COLOR = '#e5c07b';
+        const NODE_HOVER_COLOR = '#98c379';
+        const CONNECTOR_COLOR = '#c678dd';
+        const WIRE_COLOR = '#abb2bf';
+
+        // --- NEW State for coordinate editing ---
+        let selectedCoordinate = { nodeId: null, axis: null }; // e.g., { nodeId: 'repo_1_xyz', axis: 'x' }
+        const COORD_WHEEL_SPEED_XY = 30; // Pixels per wheel tick for X/Y
+        const COORD_WHEEL_SPEED_Z = 30; // Units per wheel tick for Z
+		
+        // --- Initial Setup ---
+        window.addEventListener('resize', resizeCanvas);
+
+        // Add initial setup for loading stored data
+        if (localStorage.getItem('repoNodeGraphData')) {
+            console.log("Detected stored graph data. Attempting to load...");
+            loadNodesFromLocalStorage(); 
+        } else {
+            console.log("No stored graph data found.");
+            resizeCanvas();
+        }
+
+        requestAnimationFrame(draw); // Start render loop
+
+        console.log("Repo Node Graph Initialized. Use the 'Browse...' button to load output.txt");
+
+        // --- Functions ---
+        function resizeCanvas() {
+            // Set canvas drawing buffer size to match element size
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            console.log(`Canvas resized to: ${canvas.width}x${canvas.height}`);
+            draw(); // Redraw after resize
+        }
+
+        function getNodeHeight(node) {
+            const connectorPairs = node.connectors.length / 2;
+            // Add space for the coordinate display row
+            return NODE_TITLE_HEIGHT + NODE_COORD_HEIGHT + (connectorPairs * NODE_CONNECTOR_HEIGHT) + 10;
+        }
+
+        function getTextSimilarity(text1, text2) { /* ... (same as before) ... */
+             if (!text1 || !text2) return 0; const words1 = new Set(text1.toLowerCase().match(/\w+/g) || []); const words2 = new Set(text2.toLowerCase().match(/\w+/g) || []); if (words1.size === 0 && words2.size === 0) return 1; if (words1.size === 0 || words2.size === 0) return 0; const intersection = new Set([...words1].filter(x => words2.has(x))); const union = new Set([...words1, ...words2]); return intersection.size / union.size;
+        }
+
+        function layoutNodes() {
+             if (nodes.length === 0) return;
+            console.log("--- Starting Layout ---");
+            // Date-based Z positioning
+            const dates = nodes.map(n => n.lastPush ? new Date(n.lastPush).getTime() : NaN).filter(d => !isNaN(d));
+            const minDate = dates.length > 0 ? Math.min(...dates) : Date.now();
+            const maxDate = dates.length > 0 ? Math.max(...dates) : Date.now();
+            const dateRange = (maxDate - minDate) > 0 ? (maxDate - minDate) : 1;
+            const Z_RANGE = 200;
+
+            nodes.forEach(node => {
+                const nodeTime = node.lastPush ? new Date(node.lastPush).getTime() : NaN;
+                if (!isNaN(nodeTime)) {
+                    const ratio = (nodeTime - minDate) / dateRange;
+                    node.z = -(ratio * Z_RANGE) + Z_RANGE / 2;
+                } else {
+                    node.z = 0;
+                }
+            });
+
+            // Initial Grid Layout + Collision Avoidance
+            const spacing = NODE_WIDTH * 1.5;
+            const nodesPerRow = Math.max(1, Math.floor(canvas.width / spacing));
+            const placedPositions = [];
+
+            function isOverlapping(x, y, width, height) { /* ... (same as before) ... */
+                 for (const pos of placedPositions) { if (x < pos.x + pos.width && x + width > pos.x && y < pos.y + pos.height && y + height > pos.y) return true; } return false;
+            }
+
+            const totalRows = Math.ceil(nodes.length / nodesPerRow);
+            const gridWidth = nodesPerRow * spacing;
+            const gridHeight = totalRows * spacing;
+            // Adjust start position calculation slightly
+            let startX = - (nodesPerRow -1) * spacing / 2; // Center the grid around X=0 world coords
+            let startY = - (totalRows -1) * spacing / 2; // Center the grid around Y=0 world coords
+
+            let currentX = startX;
+            let currentY = startY;
+            let col = 0;
+
+            nodes.forEach((node) => {
+                let placed = false; let tryX = currentX; let tryY = currentY; let attempts = 0; const maxAttempts = 20;
+                const nodeHeight = getNodeHeight(node); const nodeWidth = NODE_WIDTH;
+
+                // Try placing node (using center coordinates now)
+                while(!placed && attempts < maxAttempts) {
+                    // Check overlap using top-left corner derived from center
+                    if (!isOverlapping(tryX - nodeWidth/2, tryY - nodeHeight/2, nodeWidth, nodeHeight)) {
+                        node.x = tryX; // Store center X
+                        node.y = tryY; // Store center Y
+                        // Store placed position using top-left for collision checking
+                        placedPositions.push({x: tryX - nodeWidth/2, y: tryY - nodeHeight/2, width: nodeWidth, height: nodeHeight});
+                        placed = true;
+                    } else {
+                        tryX += nodeWidth * 0.2; attempts++;
+                        if (attempts % 5 === 0) { tryY += NODE_CONNECTOR_HEIGHT * 2; tryX = currentX; }
+                    }
+                }
+                if (!placed) {
+                     console.warn(`Overlap placement for ${node.name}`);
+                     node.x = currentX; node.y = currentY;
+                     placedPositions.push({x: currentX - nodeWidth/2, y: currentY - nodeHeight/2, width: nodeWidth, height: nodeHeight});
+                }
+
+                // --- LOG INITIAL COORDINATES ---
+                console.log(`Node: ${node.name}, Initial Coords: X=${node.x.toFixed(0)}, Y=${node.y.toFixed(0)}, Z=${node.z.toFixed(1)}`);
+
+                col++;
+                if (col >= nodesPerRow) {
+                    col = 0; currentX = startX; currentY += spacing;
+                } else {
+                    currentX += spacing;
+                }
+            });
+
+            console.log("--- Layout Complete ---");
+            draw();
+         }
+
+
+        function parseOutputTxt(text) { /* ... (same as v3) ... */
+            console.log("Starting parseOutputTxt..."); const repos = []; const blocks = text.split('---------------').map(b => b.trim()).filter(b => b); console.log(`Found ${blocks.length} potential blocks.`);
+            blocks.forEach((block, index) => {
+                console.log(`\nProcessing Block ${index + 1}:`); const lines = block.split('\n').map(l => l.trim()).filter(l => l); const repo = { id: `repo_${index}_${Date.now()}`, name: 'N/A', description: 'N/A', url: 'N/A', lastPush: 'N/A', x: 0, y: 0, z: 0, connectors: [] }; let foundData = false;
+                lines.forEach(line => {
+                    const colonIndex = line.indexOf(':'); if (colonIndex > -1) { const keyPart = line.substring(0, colonIndex).trim(); const valuePart = line.substring(colonIndex + 1).trim(); const cleanedKeyPart = keyPart.replace(/^\d+\.\s*/, '');
+                        console.log(`  Line: "${line}" -> Raw Key: "${keyPart}", Cleaned Key: "${cleanedKeyPart}", Value: "${valuePart}"`);
+                        if (cleanedKeyPart === 'Name') { repo.name = valuePart; foundData = true; } else if (cleanedKeyPart === 'Description') { repo.description = valuePart; foundData = true; } else if (cleanedKeyPart === 'URL') { repo.url = valuePart; foundData = true; } else if (cleanedKeyPart === 'Last Push') { repo.lastPush = valuePart; foundData = true; }
+                    } else { console.log(`  Line skipped (no colon): "${line}"`); } });
+                if (repo.name !== 'N/A') {
+                     repo.connectors.push({ id: `${repo.id}_desc_out`, type: 'output', label: 'Description', nodeId: repo.id }); repo.connectors.push({ id: `${repo.id}_url_out`, type: 'output', label: 'URL', nodeId: repo.id }); repo.connectors.push({ id: `${repo.id}_date_out`, type: 'output', label: 'Last Push', nodeId: repo.id }); repo.connectors.push({ id: `${repo.id}_desc_in`, type: 'input', label: 'Description', nodeId: repo.id }); repo.connectors.push({ id: `${repo.id}_url_in`, type: 'input', label: 'URL', nodeId: repo.id }); repo.connectors.push({ id: `${repo.id}_date_in`, type: 'input', label: 'Last Push', nodeId: repo.id });
+                    repos.push(repo); console.log(`  Added repo: ${repo.name}`); } else if (foundData) { console.warn(`  Block ${index + 1} parsed data but did not include a 'Name' field. Repo skipped.`); } else { console.warn(`  Block ${index + 1} did not yield any recognizable data. Repo skipped.`); } });
+            console.log("parseOutputTxt finished."); return repos;
+        }
+
+        fileInput.addEventListener('change', (event) => { /* ... (same as v3) ... */
+            const file = event.target.files[0]; if (!file) { statusMessage.textContent = "File selection cancelled."; statusMessage.style.color = '#e5c07b'; return; } statusMessage.textContent = `Reading ${file.name}...`; statusMessage.style.color = '#61afef'; nodes = []; wires = []; selectedNodeId = null; selectedCoordinate = { nodeId: null, axis: null }; /* Reset coord selection */ draw(); const reader = new FileReader();
+            reader.onload = (e) => {
+                statusMessage.textContent = "Parsing file content..."; console.log("FileReader onload triggered."); try { const fileContent = e.target.result; nodes = parseOutputTxt(fileContent); if (nodes.length > 0) { statusMessage.textContent = `Successfully loaded ${nodes.length} repositories. Laying out...`; statusMessage.style.color = '#98c379'; layoutNodes(); console.log(`Loaded ${nodes.length} repositories.`); setTimeout(() => { if (statusMessage.textContent.includes("Laying out...")) { statusMessage.textContent = `Loaded ${nodes.length} repositories.`; } }, 500); } else { statusMessage.textContent = "Parsing complete, but no valid repository data found in file."; statusMessage.style.color = '#e06c75'; console.warn("Parsing complete, 0 nodes loaded."); } } catch (error) { console.error("Error during file parsing:", error); statusMessage.textContent = `Error parsing file: ${error.message}`; statusMessage.style.color = '#e06c75'; alert("Error parsing file. Check format and console (F12) for details."); nodes = []; draw(); } };
+            reader.onerror = (e) => { console.error("Error reading file:", e); statusMessage.textContent = "Error reading file."; statusMessage.style.color = '#e06c75'; alert("Error reading file."); nodes = []; draw(); }; reader.readAsText(file);
+        });
+
+/*
+        // --- Functions ---
+        function saveNodesToLocalStorage() {
+            console.log("Saving nodes to localStorage...");
+            const data = {
+                nodes: nodes.map(node => ({
+                    id: node.id,
+                    name: node.name,
+                    description: node.description,
+                    url: node.url,
+                    lastPush: node.lastPush,
+                    x: node.x,
+                    y: node.y,
+                    z: node.z
+                })),
+                wires: wires
+            };
+            localStorage.setItem('repoNodeGraphData', JSON.stringify(data));
+            console.log("Nodes saved successfully. ", JSON.stringify(data));
+        }
+
+        // --- Add a function to load data from localStorage if available ---
+        function loadNodesFromLocalStorage() { 
+            const savedData = localStorage.getItem('repoNodeGraphData');
+            if (savedData) {
+                try {
+                    const data = JSON.parse(savedData);
+					// drawNode
+                    nodes = parseOutputTxt(data.nodes.map(node => `Name: ${node.name}\nDescription: ${node.description}\nURL: ${node.url}\nLast Push: ${node.lastPush}`).join('\n---------------\n'));
+                    // Copy positions from saved data to newly parsed ones
+                    nodes.forEach((newNode, index) => { 
+                        const savedNode = data.nodes[index];
+                        newNode.x = savedNode.x; 
+                        newNode.y = savedNode.y; 
+                        newNode.z = savedNode.z;
+						
+                        // if (savedNode.id === newNode.id && savedNode !== undefined) {
+						//     console.warn("Saved node position: ", newNode.x, newNode.y, newNode.z);
+                        // } else {
+                        //     console.warn("Saved node ID mismatch or missing: ", savedNode.id, newNode.id); 
+                        // }
+                    });
+                    wires = data.wires || [];
+                    statusMessage.textContent = `Loaded ${nodes.length} nodes from storage.`;
+                    statusMessage.style.color = '#98c379';
+                } catch (e) {
+                    console.error("Error loading from localStorage:", e);
+                    statusMessage.textContent = "Failed to load data from storage.";
+                    statusMessage.style.color = '#e06c75';
+                }
+            }
+        }
+*/
+
+	// --- Functions ---
+    function saveNodesToLocalStorage() {
+        console.log("Saving nodes to localStorage...");
+        const data = {
+            nodes: nodes.map(node => ({
+                id: node.id,
+                name: node.name,
+                description: node.description,
+                url: node.url,
+                lastPush: node.lastPush,
+                x: node.x,
+                y: node.y,
+                z: node.z
+            })),
+            wires: wires.map(wire => ({ // Ensure each wire has proper IDs for loading later
+                startNodeId: wire.startNodeId, 
+                startConnectorId: wire.startConnectorId,
+                endNodeId: wire.endNodeId,  
+                endConnectorId: wire.endConnectorId
+            }))
+        };
+        localStorage.setItem('repoNodeGraphData', JSON.stringify(data));
+        console.log("Nodes and wires saved successfully.", JSON.stringify(data));
+    }
+
+    // --- Add a function to load data from localStorage if available ---
+    function loadNodesFromLocalStorage() { 
+        const savedData = localStorage.getItem('repoNodeGraphData');
+        if (savedData) {
+            try {
+                const data = JSON.parse(savedData);
+                nodes = parseOutputTxt(data.nodes.map(node => `Name: ${node.name}\nDescription: ${node.description}\nURL: ${node.url}\nLast Push: ${node.lastPush}`).join('\n---------------\n'));
+                
+                // Copy positions from saved data to newly parsed ones
+                nodes.forEach((newNode, index) => { 
+                    const savedNode = data.nodes[index];
+                    newNode.x = savedNode.x; 
+                    newNode.y = savedNode.y; 
+                    newNode.z = savedNode.z;
+                });
+				
+                wires = data.wires || []; // Load wire connections directly
+                
+                statusMessage.textContent = `Loaded ${nodes.length} nodes and ${wires.length} wires from storage.`;
+                statusMessage.style.color = '#98c379';
+            } catch (e) {
+                console.error("Error loading from localStorage:", e);
+                statusMessage.textContent = "Failed to load data from storage.";
+                statusMessage.style.color = '#e06c75';
+            }
+        }
+    }
+
+        // --- Control Button Handlers ---
+		document.getElementById('saveBtn').addEventListener('click', () => { 
+            if (selectedNodeId) {
+                console.log("Save action on:", selectedNodeId);
+            } else {
+                saveNodesToLocalStorage(); // Call function to save all nodes
+            }
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) console.log("Clear action on:", selectedNodeId); else console.log("Clear: No node selected."); });
+		document.getElementById('toolBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) console.log("Tool action on:", selectedNodeId); else console.log("Tool: No node selected."); });
+        document.getElementById('forkBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) console.log("Fork action on:", selectedNodeId); else console.log("Fork: No node selected."); });
+        document.getElementById('mergeBtn').addEventListener('click', () => { /* ... */ console.log("Merge action (Not Implemented)"); });
+        document.getElementById('selectBtn').addEventListener('click', () => { /* ... */ console.log("Select tool is active."); });
+        document.getElementById('deleteBtn').addEventListener('click', () => { 
+            if (selectedNodeId) {
+                console.log("Delete action on:", selectedNodeId);
+                const deletedNodeId = selectedNodeId;
+                nodes = nodes.filter(n => n.id !== selectedNodeId); // Remove node
+                wires = wires.filter(w => w.startNodeId !== selectedNodeId && w.endNodeId !== selectedNodeId); // Remove related wires
+                if (selectedCoordinate.nodeId === deletedNodeId) { 
+                    selectedCoordinate = { nodeId: null, axis: null }; 
+                }
+                selectedNodeId = null;
+                hoveredNodeId = null;
+                console.log("Deleted node:", deletedNodeId);
+            } else {
+                console.log("Delete: No node selected.");
+            }
+        });
+
+        // --- Drawing Functions ---
+        function worldToScreen(x, y, z) { /* ... (same as before) ... */
+             const scale = perspectiveFactor / (perspectiveFactor + z); const screenX = canvas.width / 2 + (x) * scale; const screenY = canvas.height / 2 + (y) * scale; return { x: screenX, y: screenY, scale: scale };
+        }
+        function screenToWorld(screenX, screenY, z) { /* ... (same as before) ... */
+             const scale = perspectiveFactor / (perspectiveFactor + z); if (scale === 0) return {x: 0, y: 0}; const worldX = (screenX - canvas.width / 2) / scale; const worldY = (screenY - canvas.height / 2) / scale; return { x: worldX, y: worldY };
+        }
+
+        function drawNode(node) {
+            const { x: screenX, y: screenY, scale } = worldToScreen(node.x, node.y, node.z);
+            const nodeHeight = getNodeHeight(node) * scale;
+            const nodeWidth = NODE_WIDTH * scale;
+            const titleHeight = NODE_TITLE_HEIGHT * scale;
+            const coordHeight = NODE_COORD_HEIGHT * scale; // Scaled height for coord area
+            const connectorHeight = NODE_CONNECTOR_HEIGHT * scale;
+            const connectorRadius = CONNECTOR_RADIUS * Math.max(0.5, scale);
+            const fontSize = Math.max(8, 14 * scale);
+            const coordFontSize = Math.max(7, 10 * scale); // Smaller font for coords
+
+            const nodeX = screenX - nodeWidth / 2;
+            const nodeY = screenY - nodeHeight / 2;
+
+            // Store calculated screen dimensions on node temporarily for hit detection
+            node.screenRect = { x: nodeX, y: nodeY, width: nodeWidth, height: nodeHeight };
+
+            // Node Body
+            ctx.fillStyle = (node.id === selectedNodeId) ? NODE_SELECTED_COLOR : (node.id === hoveredNodeId ? NODE_HOVER_COLOR : NODE_COLOR);
+            ctx.strokeStyle = '#1c1e22';
+            ctx.lineWidth = 1;
+            ctx.fillRect(nodeX, nodeY, nodeWidth, nodeHeight);
+            ctx.strokeRect(nodeX, nodeY, nodeWidth, nodeHeight);
+
+            // Node Title
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const maxTitleWidth = nodeWidth - 10;
+            let nodeName = node.name;
+            if (ctx.measureText(nodeName).width > maxTitleWidth) { while(ctx.measureText(nodeName + '...').width > maxTitleWidth && nodeName.length > 0) { nodeName = nodeName.slice(0, -1); } nodeName += '...'; }
+            ctx.fillText(nodeName, screenX, nodeY + titleHeight / 2);
+
+            // --- Display Coordinates ---
+            const coordY = nodeY + titleHeight + coordHeight / 2;
+            const coordSpacing = nodeWidth / 3; // Divide width for X, Y, Z
+            ctx.font = `${coordFontSize}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            node.coordHitboxes = {}; // Reset hitboxes for this draw frame
+
+            ['x', 'y', 'z'].forEach((axis, index) => {
+                const coordX = nodeX + coordSpacing * (index + 0.5);
+                const value = (axis === 'z' ? node[axis].toFixed(1) : node[axis].toFixed(0));
+                const label = axis.toUpperCase();
+                const text = `${label}: ${value}`;
+
+                // Check if this coordinate is selected for editing
+                const isSelectedCoord = selectedCoordinate.nodeId === node.id && selectedCoordinate.axis === axis;
+                ctx.fillStyle = isSelectedCoord ? '#e5c07b' : '#dddddd'; // Highlight if selected
+                if (isSelectedCoord) {
+                    ctx.font = `bold ${coordFontSize}px sans-serif`; // Make selected bold
+                } else {
+                    ctx.font = `${coordFontSize}px sans-serif`;
+                }
+
+                ctx.fillText(text, coordX, coordY);
+
+                // Define and store hitbox for clicking the label (approximate)
+                 const textWidth = ctx.measureText(text).width;
+                 const hitbox = {
+                     x: coordX - textWidth / 2 - 2, // Add padding
+                     y: coordY - coordFontSize / 2 - 2,
+                     width: textWidth + 4,
+                     height: coordFontSize + 4,
+                     axis: axis
+                 };
+                 node.coordHitboxes[axis] = hitbox; // Store hitbox
+
+                 // Draw hitbox outline for debugging (optional)
+                 // ctx.strokeStyle = 'red';
+                 // ctx.lineWidth = 0.5;
+                 // ctx.strokeRect(hitbox.x, hitbox.y, hitbox.width, hitbox.height);
+            });
+
+
+            // --- Connectors ---
+            ctx.font = `${Math.max(7, 10 * scale)}px sans-serif`; // Reset font for connectors
+            let connectorStartY = nodeY + titleHeight + coordHeight; // Start connectors below coordinate area
+            node.connectors.forEach((connector, index) => {
+                const yPos = connectorStartY + (connectorHeight / 2) + (Math.floor(index / 2)) * connectorHeight;
+                const isHovered = hoveredConnectorInfo && hoveredConnectorInfo.nodeId === node.id && hoveredConnectorInfo.connectorId === connector.id;
+                ctx.fillStyle = CONNECTOR_COLOR;
+                ctx.strokeStyle = isHovered ? '#ffffff' : '#1c1e22';
+                ctx.lineWidth = isHovered ? 2 : 1;
+                let connX;
+                if(connector.type === 'input') { connX = nodeX; ctx.textAlign = 'left'; if (scale > 0.6) ctx.fillText(connector.label, nodeX + connectorRadius * 2 + 2, yPos); }
+                else { connX = nodeX + nodeWidth; ctx.textAlign = 'right'; if (scale > 0.6) ctx.fillText(connector.label, nodeX + nodeWidth - connectorRadius * 2 - 2, yPos); }
+                ctx.beginPath(); ctx.arc(connX, yPos, connectorRadius, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                connector.screenX = connX; connector.screenY = yPos; connector.screenRadius = connectorRadius;
+            });
+         }
+
+         function drawWire(wire) { /* ... (same as v3) ... */
+              const startNode = nodes.find(n => n.id === wire.startNodeId); const endNode = nodes.find(n => n.id === wire.endNodeId); if (!startNode || !endNode) return; const startConnector = startNode.connectors.find(c => c.id === wire.startConnectorId); const endConnector = endNode.connectors.find(c => c.id === wire.endConnectorId); if (!startConnector || !endConnector) return; if (startConnector.screenX === undefined || endConnector.screenX === undefined) { /*console.warn("Connector screen position missing for wire:", wire);*/ return; } ctx.beginPath(); ctx.moveTo(startConnector.screenX, startConnector.screenY); const dx = endConnector.screenX - startConnector.screenX; const dy = endConnector.screenY - startConnector.screenY; ctx.bezierCurveTo(startConnector.screenX + dx * 0.4, startConnector.screenY, endConnector.screenX - dx * 0.4, endConnector.screenY, endConnector.screenX, endConnector.screenY); ctx.strokeStyle = WIRE_COLOR; ctx.lineWidth = 1.5; ctx.stroke();
+         }
+
+         function draw() {
+             if (!ctx) return;
+             ctx.clearRect(0, 0, canvas.width, canvas.height);
+             const sortedNodes = [...nodes].sort((a, b) => b.z - a.z);
+
+             // --- Draw Wires FIRST --- (So they appear behind nodes)
+             wires.forEach(drawWire);
+
+             // --- Draw Nodes ---
+             sortedNodes.forEach(drawNode); // This now calculates screenRect and coordHitboxes
+
+             // --- Draw Preview Wire --- (Draw on top)
+            if (isWiring) { ctx.beginPath(); ctx.moveTo(wireStartX, wireStartY); const dx = wireEndX - wireStartX; const dy = wireEndY - wireStartY; ctx.bezierCurveTo(wireStartX + dx * 0.4, wireStartY, wireEndX - dx * 0.4, wireEndY, wireEndX, wireEndY); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 5]); ctx.stroke(); ctx.setLineDash([]); }
+
+             requestAnimationFrame(draw);
+         }
+
+
+        // --- Interaction Functions ---
+        function getMousePos(event) { /* ... (same as v3) ... */
+             const rect = canvas.getBoundingClientRect(); return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        }
+
+        // --- NEW: Check if mouse is over a coordinate label hitbox ---
+        function getHoveredCoordinate(mouseX, mouseY) {
+            const sortedNodes = [...nodes].sort((a, b) => a.z - b.z); // Check closer nodes first
+            for (const node of sortedNodes) {
+                if (node.coordHitboxes && node.screenRect && // Ensure hitboxes/rect were calculated
+                    mouseX >= node.screenRect.x && mouseX <= node.screenRect.x + node.screenRect.width &&
+                    mouseY >= node.screenRect.y && mouseY <= node.screenRect.y + node.screenRect.height)
+                {
+                    for (const axis in node.coordHitboxes) {
+                        const hitbox = node.coordHitboxes[axis];
+                        if (mouseX >= hitbox.x && mouseX <= hitbox.x + hitbox.width &&
+                            mouseY >= hitbox.y && mouseY <= hitbox.y + hitbox.height) {
+                            return { nodeId: node.id, axis: axis };
+                        }
+                    }
+                    // If inside node but not over a specific coord hitbox, return null
+                    // (or could return just nodeId if needed elsewhere)
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        function getHoveredConnector(mouseX, mouseY) { /* ... (same as v3) ... */
+             const sortedNodes = [...nodes].sort((a, b) => a.z - b.z); for (const node of sortedNodes) { for (const connector of node.connectors) { if (connector.screenX === undefined) continue; const dx = mouseX - connector.screenX; const dy = mouseY - connector.screenY; if (dx * dx + dy * dy < connector.screenRadius * connector.screenRadius * 1.5) { return { nodeId: node.id, connectorId: connector.id, type: connector.type }; } } } return null;
+        }
+        function getHoveredNode(mouseX, mouseY) { /* ... (same as v3) ... */
+             const sortedNodes = [...nodes].sort((a, b) => a.z - b.z); for (const node of sortedNodes) { if (!node.screenRect) continue; /* Skip if rect not calculated */ const { x, y, width, height } = node.screenRect; if (mouseX >= x && mouseX <= x + width && mouseY >= y && mouseY <= y + height) { return node.id; } } return null;
+        }
+
+        canvas.addEventListener('mousedown', (event) => {
+            const mousePos = getMousePos(event);
+            hoveredConnectorInfo = getHoveredConnector(mousePos.x, mousePos.y);
+            const hoveredCoordInfo = getHoveredCoordinate(mousePos.x, mousePos.y); // Check coords first
+
+            if (hoveredCoordInfo) {
+                // --- Select Coordinate for Editing ---
+                selectedCoordinate = hoveredCoordInfo;
+                selectedNodeId = hoveredCoordInfo.nodeId; // Also select the node
+                console.log(`Selected coordinate: ${selectedCoordinate.axis.toUpperCase()} on node ${selectedCoordinate.nodeId}`);
+                draggingNode = null; // Prevent dragging when clicking coords
+                isWiring = false; // Prevent wiring
+                event.stopPropagation();
+            } else if (hoveredConnectorInfo) {
+                // Start Wiring (same as v3)
+                isWiring = true; const startNode = nodes.find(n => n.id === hoveredConnectorInfo.nodeId); const startConnector = startNode.connectors.find(c => c.id === hoveredConnectorInfo.connectorId); wireStartX = startConnector.screenX; wireStartY = startConnector.screenY; wireEndX = mousePos.x; wireEndY = mousePos.y; wireStartConnectorInfo = hoveredConnectorInfo; draggingNode = null; selectedNodeId = null; selectedCoordinate = { nodeId: null, axis: null }; /* Clear coord selection */ event.stopPropagation();
+            } else {
+                 // Try Node Dragging or Selection (same as v3)
+                 const nodeId = getHoveredNode(mousePos.x, mousePos.y);
+                 if (nodeId) {
+                    draggingNode = nodes.find(n => n.id === nodeId);
+                    if (draggingNode) {
+                        selectedNodeId = nodeId;
+                        // Only deselect coordinate if clicking node body, not coord label
+                        if (!hoveredCoordInfo) {
+                             selectedCoordinate = { nodeId: null, axis: null };
+                        }
+                        const { scale } = worldToScreen(draggingNode.x, draggingNode.y, draggingNode.z); const worldMousePos = screenToWorld(mousePos.x, mousePos.y, draggingNode.z); dragOffsetX = draggingNode.x - worldMousePos.x; dragOffsetY = draggingNode.y - worldMousePos.y;
+                    }
+                 } else {
+                     // Clicked empty space
+                     selectedNodeId = null; draggingNode = null; selectedCoordinate = { nodeId: null, axis: null }; /* Clear coord selection */
+                 }
+            }
+        });
+
+        canvas.addEventListener('mousemove', (event) => {
+            const mousePos = getMousePos(event);
+            const currentHoveredNodeId = getHoveredNode(mousePos.x, mousePos.y);
+            const currentHoveredConnector = getHoveredConnector(mousePos.x, mousePos.y);
+            // Note: We don't need hover state for coords, only click selection
+
+            if(isWiring) { /* ... (same as v3) ... */
+                 wireEndX = mousePos.x; wireEndY = mousePos.y; hoveredConnectorInfo = currentHoveredConnector;
+            } else if (draggingNode) { /* ... (same as v3) ... */
+                 const worldMousePos = screenToWorld(mousePos.x, mousePos.y, draggingNode.z); draggingNode.x = worldMousePos.x + dragOffsetX; draggingNode.y = worldMousePos.y + dragOffsetY;
+            } else {
+                 hoveredNodeId = currentHoveredNodeId;
+                 hoveredConnectorInfo = currentHoveredConnector;
+
+                 // --- Tooltip Logic ---
+                 if (hoveredNodeId && !hoveredConnectorInfo) {
+                     const node = nodes.find(n => n.id === hoveredNodeId);
+                     if (node) {
+                         tooltip.style.display = 'block';
+                         tooltip.style.left = `${event.clientX + 15}px`;
+                         tooltip.style.top = `${event.clientY + 10}px`;
+                         tooltip.textContent = `Name: ${node.name}\nDesc: ${node.description?.substring(0, 100) + (node.description?.length > 100 ? '...' : '')}\nURL: ${node.url}\nLast Push: ${node.lastPush}`;
+                     }
+                 } else if (hoveredConnectorInfo) { /* ... (same tooltip as v3) ... */
+                      const node = nodes.find(n => n.id === hoveredConnectorInfo.nodeId); const connector = node?.connectors.find(c => c.id === hoveredConnectorInfo.connectorId); if (connector) { tooltip.style.display = 'block'; tooltip.style.left = `${event.clientX + 15}px`; tooltip.style.top = `${event.clientY + 10}px`; tooltip.textContent = `Node: ${node.name}\nConnector: ${connector.label} (${connector.type})`; }
+                 } else {
+                     tooltip.style.display = 'none';
+                 }
+             }
+        });
+
+        canvas.addEventListener('mouseup', (event) => { /* ... (same as v3, stops wiring/dragging) ... */
+             if (isWiring) { const mousePos = getMousePos(event); const endConnectorInfo = getHoveredConnector(mousePos.x, mousePos.y); if (endConnectorInfo && endConnectorInfo.nodeId !== wireStartConnectorInfo.nodeId && endConnectorInfo.type !== wireStartConnectorInfo.type) { const exists = wires.some(w => (w.startConnectorId === wireStartConnectorInfo.connectorId && w.endConnectorId === endConnectorInfo.connectorId) || (w.startConnectorId === endConnectorInfo.connectorId && w.endConnectorId === wireStartConnectorInfo.connectorId)); if (!exists) { console.log(`Connect ${wireStartConnectorInfo.nodeId}/${wireStartConnectorInfo.connectorId} to ${endConnectorInfo.nodeId}/${endConnectorInfo.connectorId}`); let startInfo = wireStartConnectorInfo; let endInfo = endConnectorInfo; if (wireStartConnectorInfo.type === 'input') { startInfo = endConnectorInfo; endInfo = wireStartConnectorInfo; } wires.push({ startNodeId: startInfo.nodeId, startConnectorId: startInfo.connectorId, endNodeId: endInfo.nodeId, endConnectorId: endInfo.connectorId, }); } else { console.log("Wire already exists or is invalid connection."); } } else { console.log("Wiring cancelled or invalid target."); } isWiring = false; wireStartConnectorInfo = null; } draggingNode = null;
+        });
+
+        // --- MODIFIED Wheel Handler ---
+        canvas.addEventListener('wheel', (event) => {
+            event.preventDefault(); // Prevent page scrolling
+
+            // Check if a coordinate is selected for editing ON THE HOVERED NODE
+            const mousePos = getMousePos(event);
+            const currentHoveredNodeId = getHoveredNode(mousePos.x, mousePos.y); // Check hover specifically for wheel event
+
+            if (selectedCoordinate.nodeId && selectedCoordinate.nodeId === currentHoveredNodeId) {
+                // --- Modify Selected Coordinate ---
+                const targetNode = nodes.find(n => n.id === selectedCoordinate.nodeId);
+                if (targetNode) {
+                    const delta = event.deltaY > 0 ? 1 : -1; // Determine wheel direction (-1 up, 1 down)
+
+                    switch(selectedCoordinate.axis) {
+                        case 'x':
+                            targetNode.x -= delta * COORD_WHEEL_SPEED_XY; // Adjust X (invert delta for natural feel)
+                            break;
+                        case 'y':
+                            targetNode.y -= delta * COORD_WHEEL_SPEED_XY; // Adjust Y
+                            break;
+                        case 'z':
+                            targetNode.z -= delta * COORD_WHEEL_SPEED_Z; // Adjust Z
+                            break;
+                    }
+                     // Optional: Clamp values if needed
+                     // targetNode.z = Math.max(-500, Math.min(500, targetNode.z));
+                     // console.log(`Adjusted ${selectedCoordinate.axis.toUpperCase()} for ${targetNode.name} to ${targetNode[selectedCoordinate.axis].toFixed(1)}`);
+                }
+            } else {
+                 // --- Fallback: Panning or View Zoom (Optional) ---
+                 // If no coordinate is selected OR wheeling over empty space/different node
+                 // console.log("Wheel event - No coordinate selected for modification.");
+                 // Example Panning (Shift + Wheel):
+                 if (event.shiftKey) {
+                    // Basic panning - adjust a global camera offset (needs implementation in worldToScreen/screenToWorld)
+                    // camera.x -= event.deltaX * 0.5; // Use deltaX/Y for panning
+                    // camera.y -= event.deltaY * 0.5;
+                    // console.log(`Panning: camera.x=${camera.x}, camera.y=${camera.y}`);
+                 }
+            }
+        });
+
+        canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
+        // --- Control Button Handlers ---
+		document.getElementById('saveBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) console.log("Save action on:", selectedNodeId); else console.log("Save: No node selected."); });
+		document.getElementById('clearBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) console.log("Clear action on:", selectedNodeId); else console.log("Clear: No node selected."); });
+		document.getElementById('toolBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) console.log("Tool action on:", selectedNodeId); else console.log("Tool: No node selected."); });
+        document.getElementById('forkBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) console.log("Fork action on:", selectedNodeId); else console.log("Fork: No node selected."); });
+        document.getElementById('mergeBtn').addEventListener('click', () => { /* ... */ console.log("Merge action (Not Implemented)"); });
+        document.getElementById('selectBtn').addEventListener('click', () => { /* ... */ console.log("Select tool is active."); });
+        document.getElementById('deleteBtn').addEventListener('click', () => { /* ... */ if (selectedNodeId) { console.log("Delete action on:", selectedNodeId); const deletedNodeId = selectedNodeId; nodes = nodes.filter(n => n.id !== selectedNodeId); wires = wires.filter(w => w.startNodeId !== selectedNodeId && w.endNodeId !== selectedNodeId); if (selectedCoordinate.nodeId === deletedNodeId) { selectedCoordinate = { nodeId: null, axis: null }; } selectedNodeId = null; hoveredNodeId = null; console.log("Deleted node:", deletedNodeId); } else console.log("Delete: No node selected."); });
+
+        // --- Initial Setup ---
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas(); // Initial size calculation and draw
+        requestAnimationFrame(draw); // Start render loop
+
+        console.log("Repo Node Graph Initialized. Use the 'Browse...' button to load output.txt");
+
+    </script>
+</body>
+</html>
