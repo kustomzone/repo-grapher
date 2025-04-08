@@ -5,11 +5,11 @@
 </div>
 <br>
 
-3D node graphing test v0.0.1:  Nodes.html loads output.txt
+3D node graphing test v0.0.1:  Nodes.html loads output.txt  (work in progress)
 
 ---
 
-### Language Field
+### Repo Size & Language Fields
 
 Use `github_lister.py` to create output.txt ~ [output-javascript.zip](https://github.com/kustomzone/repo-grapher/raw/refs/heads/main/output-javascript.zip)
 
@@ -17,11 +17,13 @@ Use `github_lister.py` to create output.txt ~ [output-javascript.zip](https://gi
 Fetched page 1 (100 repos)
 ...
 Fetched page 50 (100 repos)
-Fetched page 51 (5 repos)
-Finished fetching. Total repositories found: 5005
-Filtering repositories by language: 'Javascript'...
-Found 1168 repositories matching the language filter.
-Successfully wrote filtered repositories to 'output.txt'
+Fetched page 51 (20 repos)
+Finished fetching. Total repositories found: 5020
+No language filter applied. Including all repositories.
+Sorting repositories by size (largest first)...
+Successfully wrote 5020 repositories to 'output.txt'
 ```
+
+ 📝: Github's public API is limited to 60 unauthenticated requests (pages) per hour. See [API limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) for authenticated (token) limits.
 
 ---
